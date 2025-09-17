@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>光学シミュレーター エディタ</title>
+    <style>
+        body {
+            background-color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+            color: #ccc;
+            font-family: sans-serif;
+            flex-direction: column;
+        }
+        #main-container {
+            display: flex;
+            gap: 20px;
+        }
+        canvas {
+            border: 2px solid #555;
+            background-color: #000;
+        }
+        #sidebar {
+            width: 200px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .tool-button {
+            background-color: #555;
+            padding: 10px;
+            border: 2px solid #777;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        .tool-button.active {
+            border-color: #fff;
+            background-color: #777;
+        }
+        #save-load-panel {
+            margin-top: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            background-color: #222;
+            color: #eee;
+            border: 1px solid #555;
+            resize: none;
+        }
+        .ui-button {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            background-color: #007bff;
+            border: none;
+            color: white;
+            cursor: pointer;
+        }
+        .ui-button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div id="main-container">
+        <canvas id="opticsCanvas"></canvas>
+        <div id="sidebar">
+            <h2>ツール</h2>
+            <div class="tool-button" id="tool-mirror">鏡を追加</div>
+            <div class="tool-button" id="tool-resizable-mirror">伸び縮みできる鏡を追加</div>
+            <div class="tool-button" id="tool-wall">壁を追加</div>
+            <div class="tool-button" id="tool-goal">カップを配置</div>
+            <div class="tool-button" id="tool-light">光源を配置</div>
+            <div class="tool-button" id="tool-eraser">消しゴム</div>
+
+            <div id="save-load-panel">
+                <h3>ステージデータ</h3>
+                <textarea id="stage-data"></textarea>
+                <button class="ui-button" id="save-button">保存</button>
+                <button class="ui-button" id="load-button">読み込み</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('opticsCanvas');
+        const ctx = canvas.getContext('2d');
+        const sidebar = document.getElementById('sidebar');
+
+        canvas.width = window.innerWidth * 0.7;
+        canvas.height = window.innerHeight * 0.8;
+
+        canvas.width = canvas.clientWidth;
+        canvas.height = canvas.clientHeight;
+
+        const objects = {
+            lightSource: {
+                x: 100,
+                y: 100,
+                width: 20,
+                angle: Math.PI / 4,
+                color: 'rgba(255, 255, 0, 0.5)',
+                type: 'lightSource'
+            },
+            mirrors: [
+                {
+                    x: canvas.width / 4,
+                    y: canvas.height / 2,
+                    width: 50,
+                    height: 5,
+                    angle: Math.PI * 0.2,
+                    type: 'mirror',
+                    resizable: false
+                }
+            ],
+            walls: [],
+            goal: {
+                x: canvas.width / 2,
+                y: canvas.height * 0.8,
+                width: 40,
+                height: 40,
+                color: '#00cc00',
+                hit: false,
+                type: 'goal',
+                angle: 0
+            }
+        };
+
+        // --- ツールパレットの機能 ---
+        let activeTool = null;
+        let draggingObject = null;
+        let activeObject = null;
+        let startPos = null;
+        let resizeHandle = null;
+
+        document.querySelectorAll('.tool-button').forEach(button => {
+            button.addEventListener('click', (e) => {
+                document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+                e.currentTarget.classList.add('active');
+                activeTool = e.currentTarget.id.replace('tool-', '');
+            });
+        });
+
+        function getCanvasMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY
+    };
+}
+
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    if (dx === 0 && dy === 0) {
+        // 線分が点の場合
+        return Math.hypot(px - x1, py - y1);
+    }
+    const t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+    if (t < 0) return Math.hypot(px - x1, py - y1);
+    if (t > 1) return Math.hypot(px - x2, py - y2);
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    return Math.hypot(px - projX, py - projY);
+}
+
+        // --- マウス操作 ---
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+const { x: mouseX, y: mouseY } = getCanvasMousePos(e);
+
+    if (activeTool) {
+        if (activeTool === 'mirror') {
+            objects.mirrors.push({
+                x: mouseX, y: mouseY, width: 50, height: 5, angle: 0, type: 'mirror', resizable: false
+            });
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+        } else if (activeTool === 'resizable-mirror') {
+            objects.mirrors.push({
+                x: mouseX, y: mouseY, width: 50, height: 5, angle: 0, type: 'mirror', resizable: true
+            });
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+        } else if (activeTool === 'wall') {
+            objects.walls.push({
+                x: mouseX, y: mouseY, width: 50, height: 5, angle: 0, type: 'wall', resizable: true
+            });
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+        } else if (activeTool === 'goal') {
+            objects.goal = {
+                x: mouseX, y: mouseY, width: 40, height: 40, color: '#00cc00', hit: false, type: 'goal', angle: 0
+            };
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+        } else if (activeTool === 'lightSource') {
+            objects.lightSource.x = mouseX;
+            objects.lightSource.y = mouseY;
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+        } else if (activeTool === 'eraser') {
+            // 消しゴム処理
+            // 鏡
+            for (let i = objects.mirrors.length - 1; i >= 0; i--) {
+                const obj = objects.mirrors[i];
+                const dist = Math.sqrt((mouseX - obj.x) ** 2 + (mouseY - obj.y) ** 2);
+                if (dist < obj.width / 2 + 10) {
+                    objects.mirrors.splice(i, 1);
+                    activeTool = null;
+                    document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+                    return;
+                }
+            }
+            // 壁
+            for (let i = objects.walls.length - 1; i >= 0; i--) {
+                const obj = objects.walls[i];
+                const dist = Math.sqrt((mouseX - obj.x) ** 2 + (mouseY - obj.y) ** 2);
+                if (dist < obj.width / 2 + 10) {
+                    objects.walls.splice(i, 1);
+                    activeTool = null;
+                    document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+                    return;
+                }
+            }
+            // ゴール
+            const goal = objects.goal;
+            const distGoal = Math.sqrt((mouseX - goal.x) ** 2 + (mouseY - goal.y) ** 2);
+            if (distGoal < goal.width / 2 + 20) {
+                // ゴールを初期位置に戻す（削除扱い）
+                objects.goal = {
+                    x: canvas.width / 2,
+                    y: canvas.height * 0.8,
+                    width: 40,
+                    height: 40,
+                    color: '#00cc00',
+                    hit: false,
+                    type: 'goal',
+                    angle: 0
+                };
+                document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+                activeTool = null;
+                return;
+            }
+            // 光源は削除不可
+            activeTool = null;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+            return;
+        }
+        // ここでactiveToolブロックを閉じる
+        return;
+    }
+
+    // ↓↓↓ ここから下は通常のドラッグ・ハンドル判定
+    // ハンドル判定
+    const allMovableObjects = [...objects.mirrors, ...objects.walls, objects.lightSource, objects.goal];
+    for (const obj of allMovableObjects) {
+        // 回転ハンドル
+        if (obj.type === 'mirror' || obj.type === 'wall' || obj.type === 'goal') {
+            const rotateHandleX = obj.x + Math.cos(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleY = obj.y + Math.sin(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleDist = Math.sqrt((mouseX - rotateHandleX) ** 2 + (mouseY - rotateHandleY) ** 2);
+            if (rotateHandleDist < 15) {
+                draggingObject = 'rotate';
+                activeObject = obj;
+                return;
+            }
+        } else if (obj.type === 'lightSource') {
+            const rotateHandleX = obj.x - Math.cos(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleY = obj.y - Math.sin(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleDist = Math.sqrt((mouseX - rotateHandleX) ** 2 + (mouseY - rotateHandleY) ** 2);
+            if (rotateHandleDist < 15) {
+                draggingObject = 'lightRotate';
+                activeObject = obj;
+                return;
+            }
+        }
+        // 伸縮ハンドル
+        if (obj.resizable) {
+            const handle1 = {
+                x: obj.x - Math.cos(obj.angle) * (obj.width / 2),
+                y: obj.y - Math.sin(obj.angle) * (obj.width / 2)
+            };
+            const handle2 = {
+                x: obj.x + Math.cos(obj.angle) * (obj.width / 2),
+                y: obj.y + Math.sin(obj.angle) * (obj.width / 2)
+            };
+            const dist1 = Math.hypot(mouseX - handle1.x, mouseY - handle1.y);
+            const dist2 = Math.hypot(mouseX - handle2.x, mouseY - handle2.y);
+
+            if (dist1 < 10) {
+                draggingObject = 'resize';
+                activeObject = obj;
+                resizeHandle = 1;
+                return;
+            }
+            if (dist2 < 10) {
+                draggingObject = 'resize';
+                activeObject = obj;
+                resizeHandle = 2;
+                return;
+            }
+        }
+    }
+
+    // オブジェクト本体のドラッグ判定
+for (const obj of allMovableObjects) {
+    let isDrag = false;
+    if (obj.type === 'lightSource') {
+        const dist = Math.hypot(mouseX - obj.x, mouseY - obj.y);
+        isDrag = dist < obj.width / 2 + 10;
+    } else if (obj.type === 'goal') {
+        const dist = Math.hypot(mouseX - obj.x, mouseY - obj.y);
+        isDrag = dist < obj.width / 2 + 20;
+    } else if (obj.type === 'mirror' || obj.type === 'wall') {
+        // resizableかどうかに関係なく、線分からの距離で判定
+        const angle = obj.angle;
+        const x1 = obj.x - Math.cos(angle) * (obj.width / 2);
+        const y1 = obj.y - Math.sin(angle) * (obj.width / 2);
+        const x2 = obj.x + Math.cos(angle) * (obj.width / 2);
+        const y2 = obj.y + Math.sin(angle) * (obj.width / 2);
+        const dist = pointToSegmentDistance(mouseX, mouseY, x1, y1, x2, y2);
+        isDrag = dist < 15; // 15px以内ならドラッグ可
+    }
+
+    if (isDrag) {
+        draggingObject = (obj.type === 'lightSource') ? 'lightDrag' : 'drag';
+        activeObject = obj;
+        startPos = { x: mouseX, y: mouseY };
+        return;
+    }
+}
+});
+
+window.addEventListener('mouseup', () => {
+    draggingObject = null;
+    activeObject = null;
+    startPos = null;
+    resizeHandle = null;
+});
+
+        canvas.addEventListener('mousemove', (e) => {
+    // すでにドラッグ中なら従来通りの処理
+    if (draggingObject || activeObject) return;
+
+    const rect = canvas.getBoundingClientRect();
+const { x: mouseX, y: mouseY } = getCanvasMousePos(e);
+
+    let cursor = 'default';
+    const allMovableObjects = [...objects.mirrors, ...objects.walls, objects.lightSource, objects.goal];
+    for (const obj of allMovableObjects) {
+        // 回転ハンドル
+        if (obj.type === 'mirror' || obj.type === 'wall') {
+            const rotateHandleX = obj.x + Math.cos(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleY = obj.y + Math.sin(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleDist = Math.hypot(mouseX - rotateHandleX, mouseY - rotateHandleY);
+            if (rotateHandleDist < 15) {
+                cursor = 'grab';
+                break;
+            }
+        } else if (obj.type === 'goal') {
+            const handleX = obj.x + Math.cos(obj.angle) * (obj.width / 2 + 15);
+            const handleY = obj.y + Math.sin(obj.angle) * (obj.width / 2 + 15);
+            const handleDist = Math.hypot(mouseX - handleX, mouseY - handleY);
+            if (handleDist < 15) {
+                cursor = 'grab';
+                break;
+            }
+        } else if (obj.type === 'lightSource') {
+            const rotateHandleX = obj.x - Math.cos(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleY = obj.y - Math.sin(obj.angle) * (obj.width / 2 + 15);
+            const rotateHandleDist = Math.hypot(mouseX - rotateHandleX, mouseY - rotateHandleY);
+            if (rotateHandleDist < 15) {
+                cursor = 'grab';
+                break;
+            }
+        }
+        // 伸縮ハンドル
+        if (obj.resizable) {
+            const handle1 = {
+                x: obj.x - Math.cos(obj.angle) * (obj.width / 2),
+                y: obj.y - Math.sin(obj.angle) * (obj.width / 2)
+            };
+            const handle2 = {
+                x: obj.x + Math.cos(obj.angle) * (obj.width / 2),
+                y: obj.y + Math.sin(obj.angle) * (obj.width / 2)
+            };
+            const dist1 = Math.hypot(mouseX - handle1.x, mouseY - handle1.y);
+            const dist2 = Math.hypot(mouseX - handle2.x, mouseY - handle2.y);
+            if (dist1 < 10 || dist2 < 10) {
+                cursor = 'ew-resize';
+                break;
+            }
+        }
+    }
+        // 本体ドラッグ
+    for (const obj of allMovableObjects) {
+        let isDrag = false;
+        if (obj.type === 'lightSource') {
+            const dist = Math.hypot(mouseX - obj.x, mouseY - obj.y);
+            isDrag = dist < obj.width / 2 + 10;
+        } else if (obj.type === 'goal') {
+            const dist = Math.hypot(mouseX - obj.x, mouseY - obj.y);
+            isDrag = dist < obj.width / 2 + 20;
+        } else if (obj.type === 'mirror' || obj.type === 'wall') {
+            const angle = obj.angle;
+            const x1 = obj.x - Math.cos(angle) * (obj.width / 2);
+            const y1 = obj.y - Math.sin(angle) * (obj.width / 2);
+            const x2 = obj.x + Math.cos(angle) * (obj.width / 2);
+            const y2 = obj.y + Math.sin(angle) * (obj.width / 2);
+            const dist = pointToSegmentDistance(mouseX, mouseY, x1, y1, x2, y2);
+            isDrag = dist < 15;
+        }
+
+        if (isDrag) {
+            cursor = 'move';
+            break;
+        }
+    }
+    canvas.style.cursor = cursor;
+});
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!draggingObject || !activeObject) return;
+
+            const rect = canvas.getBoundingClientRect();
+const { x: mouseX, y: mouseY } = getCanvasMousePos(e);
+
+            if (draggingObject === 'drag' || draggingObject === 'lightDrag') {
+                activeObject.x += mouseX - startPos.x;
+                activeObject.y += mouseY - startPos.y;
+                startPos.x = mouseX;
+                startPos.y = mouseY;
+            } else if (draggingObject === 'rotate') {
+                activeObject.angle = Math.atan2(mouseY - activeObject.y, mouseX - activeObject.x);
+            } else if (draggingObject === 'lightRotate') {
+                activeObject.angle = Math.atan2(activeObject.y - mouseY, activeObject.x - mouseX);
+            } else if (draggingObject === 'resize') {
+                const angle = activeObject.angle;
+                
+                let fixedX, fixedY;
+                if (resizeHandle === 1) {
+                    fixedX = activeObject.x + Math.cos(angle) * activeObject.width / 2;
+                    fixedY = activeObject.y + Math.sin(angle) * activeObject.width / 2;
+                } else {
+                    fixedX = activeObject.x - Math.cos(angle) * activeObject.width / 2;
+                    fixedY = activeObject.y - Math.sin(angle) * activeObject.width / 2;
+                }
+
+                const newLength = Math.sqrt(Math.pow(mouseX - fixedX, 2) + Math.pow(mouseY - fixedY, 2));
+                const newCenterX = (mouseX + fixedX) / 2;
+                const newCenterY = (mouseY + fixedY) / 2;
+
+                activeObject.x = newCenterX;
+                activeObject.y = newCenterY;
+                activeObject.width = newLength;
+            }
+        });
+
+        // --- 保存・読み込み機能 ---
+        document.getElementById('save-button').addEventListener('click', () => {
+            const dataToSave = {
+                lightSource: { x: objects.lightSource.x, y: objects.lightSource.y, angle: objects.lightSource.angle, type: objects.lightSource.type },
+                mirrors: objects.mirrors.map(({ x, y, width, height, angle, type, resizable }) => ({ x, y, width, height, angle, type, resizable })),
+                walls: objects.walls.map(({ x, y, width, height, angle, type, resizable }) => ({ x, y, width, height, angle, type, resizable })),
+                goal: { x: objects.goal.x, y: objects.goal.y, width: objects.goal.width, height: objects.goal.height, angle: objects.goal.angle, type: objects.goal.type }
+            };
+            document.getElementById('stage-data').value = JSON.stringify(dataToSave, null, 2);
+        });
+
+        document.getElementById('load-button').addEventListener('click', () => {
+            try {
+                const dataToLoad = JSON.parse(document.getElementById('stage-data').value);
+                objects.lightSource = { ...dataToLoad.lightSource, color: 'rgba(255, 255, 0, 0.5)', width: 20 };
+                objects.mirrors = dataToLoad.mirrors;
+                objects.walls = dataToLoad.walls;
+                objects.goal = { ...dataToLoad.goal, hit: false, color: '#00cc00' };
+            } catch (e) {
+                alert('無効なステージデータです。');
+            }
+        });
+
+        // --- 描画・衝突判定ロジック ---
+        function getIntersection(p1, p2, p3, p4) {
+            const epsilon = 0.001;
+            const det = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+
+            if (Math.abs(det) < epsilon) {
+                return null;
+            }
+
+            const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / det;
+            const u = -((p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)) / det;
+
+            if (t > epsilon && t <= 1 + epsilon && u >= -epsilon && u <= 1 + epsilon) {
+                return { x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y) };
+            }
+            return null;
+        }
+        
+        // ゴールカップの座標を計算するヘルパー関数
+        function getGoalSegments(goal) {
+            const hw = goal.width / 2;
+            const hh = goal.height / 2;
+            
+            const p1 = { x: -hw, y: -hh };
+            const p2 = { x: -hw, y: hh };
+            const p3 = { x: hw, y: hh };
+            const p4 = { x: hw, y: -hh };
+
+            const rotatedPoints = [p1, p2, p3, p4].map(p => {
+                const rotatedX = p.x * Math.cos(goal.angle) - p.y * Math.sin(goal.angle);
+                const rotatedY = p.x * Math.sin(goal.angle) + p.y * Math.cos(goal.angle);
+                return { x: rotatedX + goal.x, y: rotatedY + goal.y };
+            });
+
+            return [
+                { p1: rotatedPoints[1], p2: rotatedPoints[2], type: 'goal-bottom' },
+                { p1: rotatedPoints[0], p2: rotatedPoints[1], type: 'goal-side' },
+                { p1: rotatedPoints[2], p2: rotatedPoints[3], type: 'goal-side' }
+            ];
+        }
+
+        function drawRayPath(pathVertices) {
+            ctx.fillStyle = objects.lightSource.color;
+            ctx.beginPath();
+            ctx.moveTo(pathVertices[0].x, pathVertices[0].y);
+            for(let i = 1; i < pathVertices.length; i++) {
+                ctx.lineTo(pathVertices[i].x, pathVertices[i].y);
+            }
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function traceRay() {
+            let rayPaths = [];
+            let currentRayStart1 = { x: objects.lightSource.x, y: objects.lightSource.y };
+            let currentRayStart2 = { x: objects.lightSource.x, y: objects.lightSource.y };
+            let currentRayAngle = objects.lightSource.angle;
+            
+            const rayWidth = objects.lightSource.width / 2;
+            
+            let perpAngle = currentRayAngle - Math.PI / 2;
+            currentRayStart1 = {
+                x: currentRayStart1.x + Math.cos(perpAngle) * rayWidth,
+                y: currentRayStart1.y + Math.sin(perpAngle) * rayWidth
+            };
+            currentRayStart2 = {
+                x: currentRayStart2.x - Math.cos(perpAngle) * rayWidth,
+                y: currentRayStart2.y - Math.sin(perpAngle) * rayWidth
+            };
+            
+            objects.goal.hit = false;
+
+            for (let i = 0; i < 15; i++) { // 修正: 反射回数の上限を15回に増加
+                let closestIntersection1 = null;
+                let closestIntersection2 = null;
+                let closestObject = null;
+                let closestType = null;
+                let closestDist = Infinity;
+                
+                const currentRayDirX = Math.cos(currentRayAngle);
+                const currentRayDirY = Math.sin(currentRayAngle);
+
+                const currentRayEnd1 = { x: currentRayStart1.x + currentRayDirX * 2000, y: currentRayStart1.y + currentRayDirY * 2000 };
+                const currentRayEnd2 = { x: currentRayStart2.x + currentRayDirX * 2000, y: currentRayStart2.y + currentRayDirY * 2000 };
+                
+                const allObstacles = [];
+                for (const mirror of objects.mirrors) {
+                    const obstacleAngle = mirror.angle;
+                    const obstacleDirX = Math.cos(obstacleAngle);
+                    const obstacleDirY = Math.sin(obstacleAngle);
+                    const obstacleStart = {
+                        x: mirror.x - obstacleDirX * (mirror.width / 2),
+                        y: mirror.y - obstacleDirY * (mirror.width / 2)
+                    };
+                    const obstacleEnd = {
+                        x: mirror.x + obstacleDirX * (mirror.width / 2),
+                        y: mirror.y + obstacleDirY * (mirror.width / 2)
+                    };
+                    allObstacles.push({ p1: obstacleStart, p2: obstacleEnd, object: mirror, type: 'mirror' });
+                }
+
+                for (const wall of objects.walls) {
+                    const obstacleAngle = wall.angle;
+                    const obstacleDirX = Math.cos(obstacleAngle);
+                    const obstacleDirY = Math.sin(obstacleAngle);
+                    const obstacleStart = {
+                        x: wall.x - obstacleDirX * (wall.width / 2),
+                        y: wall.y - obstacleDirY * (wall.width / 2)
+                    };
+                    const obstacleEnd = {
+                        x: wall.x + obstacleDirX * (wall.width / 2),
+                        y: wall.y + obstacleDirY * (wall.width / 2)
+                    };
+                    allObstacles.push({ p1: obstacleStart, p2: obstacleEnd, object: wall, type: 'wall' });
+                }
+
+                const goalSegments = getGoalSegments(objects.goal);
+                allObstacles.push(...goalSegments.map(s => ({ p1: s.p1, p2: s.p2, object: objects.goal, type: s.type })));
+
+                for (const obstacle of allObstacles) {
+                    const intersection1 = getIntersection(currentRayStart1, currentRayEnd1, obstacle.p1, obstacle.p2);
+                    const intersection2 = getIntersection(currentRayStart2, currentRayEnd2, obstacle.p1, obstacle.p2);
+                    
+                    if (intersection1 && intersection2) {
+                        const dist1 = Math.sqrt((intersection1.x - currentRayStart1.x) ** 2 + (intersection1.y - currentRayStart1.y) ** 2);
+                        const dist2 = Math.sqrt((intersection2.x - currentRayStart2.x) ** 2 + (intersection2.y - currentRayStart2.y) ** 2);
+                        const avgDist = (dist1 + dist2) / 2;
+
+                        if (avgDist < closestDist) {
+                            closestDist = avgDist;
+                            closestIntersection1 = intersection1;
+                            closestIntersection2 = intersection2;
+                            closestObject = obstacle.object;
+                            closestType = obstacle.type;
+                        }
+                    }
+                }
+                
+                // 境界線との衝突判定
+                if (closestIntersection1 === null) {
+                    const boundaries = [
+                        { p1: { x: 0, y: 0 }, p2: { x: canvas.width, y: 0 }, type: 'boundary' },
+                        { p1: { x: canvas.width, y: 0 }, p2: { x: canvas.width, y: canvas.height }, type: 'boundary' },
+                        { p1: { x: canvas.width, y: canvas.height }, p2: { x: 0, y: canvas.height }, type: 'boundary' },
+                        { p1: { x: 0, y: canvas.height }, p2: { x: 0, y: 0 }, type: 'boundary' }
+                    ];
+
+                    for (const boundary of boundaries) {
+                         const intersection1 = getIntersection(currentRayStart1, currentRayEnd1, boundary.p1, boundary.p2);
+                         const intersection2 = getIntersection(currentRayStart2, currentRayEnd2, boundary.p1, boundary.p2);
+
+                         if (intersection1 && intersection2) {
+                             closestIntersection1 = intersection1;
+                             closestIntersection2 = intersection2;
+                             closestObject = null;
+                             closestType = 'boundary';
+                             break;
+                         }
+                    }
+                }
+
+                if (closestIntersection1 && closestIntersection2) {
+                    const pathVertices = [currentRayStart1, currentRayStart2, closestIntersection2, closestIntersection1];
+                    rayPaths.push(pathVertices);
+
+                    if (closestType === 'mirror') {
+                        const mirrorAngle = closestObject.angle;
+                        const incidentAngle = currentRayAngle;
+                        
+                        let reflectedAngle = 2 * mirrorAngle - incidentAngle;
+                        
+                        currentRayStart1 = closestIntersection1;
+                        currentRayStart2 = closestIntersection2;
+                        currentRayAngle = reflectedAngle;
+                    } else if (closestType === 'goal-bottom') {
+                        objects.goal.hit = true;
+                        break;
+                    } else if (closestType === 'wall' || closestType === 'boundary' || closestType === 'goal-side') {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            return rayPaths;
+        }
+
+        // ゴールカップの描画関数
+        function drawGoal(goal) {
+            ctx.strokeStyle = goal.color;
+            ctx.lineWidth = 5;
+            
+            const segments = getGoalSegments(goal);
+            
+            ctx.beginPath();
+            ctx.moveTo(segments[1].p1.x, segments[1].p1.y);
+            ctx.lineTo(segments[1].p2.x, segments[1].p2.y);
+            ctx.lineTo(segments[0].p2.x, segments[0].p2.y);
+            ctx.lineTo(segments[2].p2.x, segments[2].p2.y);
+            ctx.stroke();
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.globalCompositeOperation = 'source-over';
+
+            // 光源を描画（半月状）
+            ctx.fillStyle = '#888';
+            ctx.save();
+            ctx.translate(objects.lightSource.x, objects.lightSource.y);
+            ctx.rotate(objects.lightSource.angle);
+            ctx.beginPath();
+            ctx.arc(0, 0, objects.lightSource.width / 2, -Math.PI / 2, Math.PI / 2, true);
+            ctx.fill();
+            ctx.restore();
+
+            // ゴールを描画（コの字形）
+            drawGoal(objects.goal);
+
+            // 鏡と壁を描画
+            const allObjects = [...objects.mirrors, ...objects.walls];
+            for (const obj of allObjects) {
+                ctx.save();
+                ctx.translate(obj.x, obj.y);
+                ctx.rotate(obj.angle);
+                ctx.fillStyle = obj.type === 'mirror' ? '#999' : '#8B4513';
+                ctx.fillRect(-obj.width / 2, -obj.height / 2, obj.width, obj.height);
+                ctx.restore();
+            }
+
+            // マウス操作用のハンドルを描画
+            const allMovableObjects = [...objects.mirrors, ...objects.walls, objects.lightSource, objects.goal];
+            for (const obj of allMovableObjects) {
+                // 回転ハンドル
+                if (obj.type === 'mirror' || obj.type === 'wall' || obj.type === 'goal') {
+                    ctx.save();
+                    ctx.translate(obj.x, obj.y);
+                    ctx.rotate(obj.angle);
+                    ctx.beginPath();
+                    ctx.arc(obj.width / 2 + 15, 0, 8, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'white';
+                    ctx.fill();
+                    ctx.restore();
+                } else if (obj.type === 'lightSource') {
+                    ctx.save();
+                    ctx.translate(obj.x, obj.y);
+                    ctx.rotate(obj.angle);
+                    ctx.beginPath();
+                    ctx.arc(-obj.width / 2 - 15, 0, 8, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'white';
+                    ctx.fill();
+                    ctx.restore();
+                }
+                
+                // 長さ変更ハンドル (resizableがtrueのオブジェクトのみ)
+                if (obj.resizable) {
+                    ctx.save();
+                    ctx.translate(obj.x, obj.y);
+                    ctx.rotate(obj.angle);
+                    ctx.beginPath();
+                    ctx.arc(-obj.width / 2, 0, 5, 0, 2 * Math.PI);
+                    ctx.arc(obj.width / 2, 0, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.restore();
+                }
+            }
+            
+            const rayPaths = traceRay();
+            if (rayPaths.length > 0) {
+                for (const path of rayPaths) {
+                    drawRayPath(path);
+                }
+            }
+
+            if (objects.goal.hit) {
+                ctx.fillStyle = 'yellow';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('Hit!', objects.goal.x, objects.goal.y + objects.goal.height / 2 + 20);
+            }
+            
+            requestAnimationFrame(draw);
+        }
+        draw();
+    </script>
+</body>
+</html>
